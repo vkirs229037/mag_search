@@ -100,7 +100,7 @@ def search_in_file(filepath, query, min_score):
 @app.route('/api/search/healthcheck', methods=['GET'])
 def healthcheck():
     return jsonify({
-        "message": "ok",
+        "message": "search ok",
         "version": app.config.get('service_version', 'unknown')
     })
 
