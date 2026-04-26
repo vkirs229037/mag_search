@@ -18,10 +18,7 @@ logger = logging.getLogger(__name__)
 
 # Загрузка конфигурации
 def load_config():
-    env = os.getenv('ENVIRONMENT', 'dev').lower()
-    config_filename = f"config.{env}.yaml"
-    logger.info(f"Загрузка конфига для окружения: {env} -> {config_filename}")
-
+    config_filename = f"config.yaml"
     try:
         with open(config_filename, 'r') as f:
             return yaml.safe_load(f)
@@ -51,7 +48,7 @@ def verify_token():
     try:
         # Отправляем запрос к сервису авторизации для проверки токена
         response = requests.get(
-            f"{app.config["AUTH_SERVICE_URL"]}/api/me", 
+            f"{app.config["AUTH_SERVICE_URL"]}/api/auth/me",
             headers=headers, 
             timeout=2
         )
@@ -100,14 +97,14 @@ def search_in_file(filepath, query, min_score):
 
     return results
 
-@app.route('/healthcheck', methods=['GET'])
+@app.route('/api/search/healthcheck', methods=['GET'])
 def healthcheck():
     return jsonify({
         "message": "ok",
         "version": app.config.get('service_version', 'unknown')
     })
 
-@app.route('/api/files', methods=['GET'])
+@app.route('/api/search/files', methods=['GET'])
 def list_files():
     if not verify_token():
         abort(401)
@@ -115,7 +112,7 @@ def list_files():
     files = get_log_files()
     return jsonify(files)
 
-@app.route('/api/files/<path:filepath>', methods=['GET'])
+@app.route('/api/search/files/<path:filepath>', methods=['GET'])
 def view_file(filepath):
     if not verify_token():
         abort(401)
@@ -207,4 +204,4 @@ def search():
     return jsonify(response_data)
 
 if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=5001, debug=app.config["debug_mode"])
+    app.run(host='0.0.0.0', port=5000, debug=app.config["debug_mode"])
