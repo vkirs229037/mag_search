@@ -4,23 +4,21 @@ import time
 import yaml
 import logging
 import requests
-from datetime import datetime
-from flask import Flask, request, jsonify, abort
+from datetime import datetime, timezone
+from flask import Flask, request, jsonify, abort, g
 from flask_cors import CORS
 from rapidfuzz import fuzz, process
 import threading
-from datetime import datetime, timezone
+import json
+import sys
+import uuid
+from pythonjsonlogger import jsonlogger
 
 SERVICE_START_TIME = datetime.now(timezone.utc)
 REQUEST_STATS = {"2xx": 0, "4xx": 0, "5xx": 0, "other": 0}
 STATS_LOCK = threading.Lock()
 
 app = Flask(__name__)
-
-# Настройка логирования самого микросервиса
-logging.basicConfig(filename='service.log', level=logging.INFO,
-                    format='%(asctime)s - %(levelname)s - %(message)s')
-logger = logging.getLogger(__name__)
 
 # Загрузка конфигурации
 def load_config():
@@ -39,6 +37,32 @@ config = load_config()
 app.config.update(config)
 
 CORS(app)
+
+class RequestFormatter(jsonlogger.JsonFormatter):
+    """Добавляет контекст запроса в каждый лог"""
+    def add_fields(self, log_record, record, message_dict):
+        super().add_fields(log_record, record, message_dict)
+        log_record['timestamp'] = datetime.now(timezone.utc).isoformat()
+        log_record['level'] = record.levelname
+        log_record['service'] = "search-service"
+        log_record['version'] = app.config.get('version', 'unknown')
+        # Добавляем request_id из g (если установлен в before_request)
+        if hasattr(g, 'request_id'):
+            log_record['request_id'] = g.request_id
+        # Добавляем пользовательский контекст, если есть
+        if hasattr(g, 'current_user') and g.current_user:
+            log_record['user_id'] = getattr(g.current_user, 'id', None)
+            log_record['user_email'] = getattr(g.current_user, 'email', None)
+
+# Настройка логгера
+log_handler = logging.StreamHandler(sys.stdout)
+log_handler.setFormatter(RequestFormatter(
+    '%(timestamp)s %(level)s %(service)s %(request_id)s %(message)s'
+))
+logger = logging.getLogger(__name__)
+logger.setLevel(logging.INFO)
+logger.addHandler(log_handler)
+logger.propagate = False  # Чтобы не дублировать логи в root-логгер
 
 def verify_token():
     token = request.headers.get('Authorization')
@@ -116,6 +140,39 @@ def track_response(response):
             REQUEST_STATS["5xx"] += 1
         else:
             REQUEST_STATS["other"] += 1
+    return response
+
+@app.before_request
+def before_request():
+    """Генерирует request_id и логирует начало запроса"""
+    g.request_id = str(uuid.uuid4())
+    g.start_time = time.time()  # для расчёта duration
+
+    logger.info("request_started", extra={
+        "method": request.method,
+        "path": request.path,
+        "remote_addr": request.remote_addr,
+        "user_agent": request.headers.get('User-Agent', '')[:100]  # обрезаем, чтобы не засорять
+    })
+
+@app.after_request
+def after_request(response):
+    """Логирует завершение запроса с метриками"""
+    duration = time.time() - getattr(g, 'start_time', time.time())
+
+    log_data = {
+        "method": request.method,
+        "path": request.path,
+        "status_code": response.status_code,
+        "duration_ms": round(duration * 1000, 2),
+        "response_size": response.content_length or 0
+    }
+
+    if response.status_code >= 400:
+        # Логируем тело ошибки (но не успешные ответы и не авторизацию)
+        log_data["response_sample"] = response.get_data(as_text=True)[:200]
+
+    logger.info("request_completed", extra=log_data)
     return response
 
 @app.route('/api/search/healthcheck', methods=['GET'])
@@ -197,8 +254,6 @@ def search():
     page = request.args.get('page', default=1, type=int)
     size = request.args.get('size', default=app.config['default_page_size'], type=int)
 
-    logger.info(f"Search request by {user_data.get('email')}: query='{query}'")
-
     # Логирование запроса
     user = request.headers.get('X-User', 'anonymous') # Предполагаем, что пользователь передается прокси
     logger.info(f"Search request by {user}: query='{query}', params={request.args}")
@@ -229,6 +284,13 @@ def search():
     paginated_results = all_results[start_idx:end_idx]
 
     execution_time = time.time() - start_time
+
+    logger.info("search_executed", extra={
+        "user_email": user_data.get('email'),
+        "query": query,
+        "fuzziness": fuzziness,
+        "files_processed": files_processed
+    })
 
     response_data = {
         "results": paginated_results,
