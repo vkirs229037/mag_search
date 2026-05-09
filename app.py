@@ -8,6 +8,12 @@ from datetime import datetime
 from flask import Flask, request, jsonify, abort
 from flask_cors import CORS
 from rapidfuzz import fuzz, process
+import threading
+from datetime import datetime, timezone
+
+SERVICE_START_TIME = datetime.now(timezone.utc)
+REQUEST_STATS = {"2xx": 0, "4xx": 0, "5xx": 0, "other": 0}
+STATS_LOCK = threading.Lock()
 
 app = Flask(__name__)
 
@@ -23,10 +29,10 @@ def load_config():
         with open(config_filename, 'r') as f:
             return yaml.safe_load(f)
     except FileNotFoundError:
-        logging.error(f"Не найден файл конфигурации '{config_filename}', приложение не может быть запущено")
+        logger.error(f"Не найден файл конфигурации '{config_filename}', приложение не может быть запущено")
         raise FileNotFoundError(f"config file {config_filename} missing")
     except yaml.YAMLError as e:
-        logging.error(f"Ошибка парсировки YAML: {e}")
+        logger.error(f"Ошибка парсировки YAML: {e}")
         raise e
 
 config = load_config()
@@ -97,11 +103,44 @@ def search_in_file(filepath, query, min_score):
 
     return results
 
+@app.after_request
+def track_response(response):
+    """Подсчёт обработанных запросов по кодам ответов"""
+    with STATS_LOCK:
+        status = response.status_code
+        if 200 <= status < 300:
+            REQUEST_STATS["2xx"] += 1
+        elif 400 <= status < 500:
+            REQUEST_STATS["4xx"] += 1
+        elif 500 <= status < 600:
+            REQUEST_STATS["5xx"] += 1
+        else:
+            REQUEST_STATS["other"] += 1
+    return response
+
 @app.route('/api/search/healthcheck', methods=['GET'])
 def healthcheck():
     return jsonify({
         "message": "search ok",
         "version": app.config.get('service_version', 'unknown')
+    })
+
+@app.route('/api/search/stats', methods=['GET'])
+def stats():
+    """Service metrics for monitoring and healthcheck"""
+    now = datetime.now(timezone.utc)
+    uptime = (now - SERVICE_START_TIME).total_seconds()
+
+    with STATS_LOCK:
+        stats_copy = dict(REQUEST_STATS)
+
+    return jsonify({
+        "service": "search-service",
+        "version": app.config.get('VERSION', app.config.get('service_version', 'unknown')),
+        "start_time": SERVICE_START_TIME.isoformat(),
+        "uptime_seconds": round(uptime, 2),
+        "requests": stats_copy,
+        "timestamp": now.isoformat()
     })
 
 @app.route('/api/search/files', methods=['GET'])
